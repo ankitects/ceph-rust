@@ -26,6 +26,7 @@ use nom::number::complete::le_u32;
 use nom::IResult;
 use serde_json;
 
+use crate::completion::Completion;
 use crate::rados::*;
 #[cfg(feature = "rados_striper")]
 use crate::rados_striper::*;
@@ -39,6 +40,8 @@ use std::io::{BufRead, Cursor};
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use uuid::Uuid;
 
 const CEPH_OSD_TMAP_HDR: char = 'h';
