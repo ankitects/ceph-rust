@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 
+use crate::error::RadosResult;
 use crate::rados::{
     rados_aio_create_completion2, rados_aio_get_return_value, rados_aio_is_complete,
     rados_aio_release, rados_aio_wait_for_complete_and_cb, rados_completion_t,
@@ -106,5 +107,18 @@ impl std::future::Future for Completion {
 
             std::task::Poll::Pending
         }
+    }
+}
+
+pub async fn with_completion<F>(f: F) -> RadosResult<i32>
+where
+    F: FnOnce(rados_completion_t) -> libc::c_int,
+{
+    let completion = Completion::new();
+    let ret_code = f(completion.get_completion());
+    if ret_code < 0 {
+        Err(ret_code.into())
+    } else {
+        completion.await
     }
 }
