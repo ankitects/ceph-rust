@@ -937,6 +937,60 @@ impl IoCtx {
         Ok(())
     }
 
+    pub async fn rados_async_object_write(
+        &self,
+        object_name: &str,
+        buffer: &[u8],
+        offset: u64,
+    ) -> RadosResult<i32> {
+        self.ioctx_guard()?;
+        let obj_name_str = CString::new(object_name)?;
+
+        let completion = Completion::new();
+
+        let ret_code = unsafe {
+            rados_aio_write(
+                self.ioctx,
+                obj_name_str.as_ptr(),
+                completion.get_completion(),
+                buffer.as_ptr() as *const ::libc::c_char,
+                buffer.len(),
+                offset,
+            )
+        };
+        if ret_code < 0 {
+            Err(ret_code.into())
+        } else {
+            completion.await
+        }
+    }
+
+    pub async fn rados_async_object_write_full(
+        &self,
+        object_name: &str,
+        buffer: &[u8],
+    ) -> RadosResult<i32> {
+        self.ioctx_guard()?;
+        let obj_name_str = CString::new(object_name)?;
+
+        let completion = Completion::new();
+
+        let ret_code = unsafe {
+            rados_aio_write_full(
+                self.ioctx,
+                obj_name_str.as_ptr(),
+                completion.get_completion(),
+                buffer.as_ptr() as *const ::libc::c_char,
+                buffer.len(),
+            )
+        };
+        if ret_code < 0 {
+            Err(ret_code.into())
+        } else {
+            completion.await
+        }
+    }
+
     /// Efficiently copy a portion of one object to another
     /// If the underlying filesystem on the OSD supports it, this will be a
     /// copy-on-write clone.
