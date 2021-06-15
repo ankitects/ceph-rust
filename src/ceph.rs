@@ -26,7 +26,7 @@ use nom::number::complete::le_u32;
 use nom::IResult;
 use serde_json;
 
-use crate::completion::Completion;
+use crate::completion::{with_completion, Completion};
 use crate::rados::*;
 #[cfg(feature = "rados_striper")]
 use crate::rados_striper::*;
@@ -973,22 +973,16 @@ impl IoCtx {
         self.ioctx_guard()?;
         let obj_name_str = CString::new(object_name)?;
 
-        let completion = Completion::new();
-
-        let ret_code = unsafe {
+        with_completion(|c| unsafe {
             rados_aio_write_full(
                 self.ioctx,
                 obj_name_str.as_ptr(),
-                completion.get_completion(),
+                c,
                 buffer.as_ptr() as *const ::libc::c_char,
                 buffer.len(),
             )
-        };
-        if ret_code < 0 {
-            Err(ret_code.into())
-        } else {
-            completion.await
-        }
+        })
+        .await
     }
 
     /// Efficiently copy a portion of one object to another
