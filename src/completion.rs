@@ -17,60 +17,40 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-use crate::ceph::IoCtx;
 use crate::error::RadosResult;
 use crate::rados::{
-    rados_aio_cancel, rados_aio_create_completion2, rados_aio_get_return_value,
-    rados_aio_is_complete, rados_aio_release, rados_aio_wait_for_complete_and_cb,
-    rados_completion_t,
+    rados_aio_create_completion2, rados_aio_get_return_value, rados_aio_is_complete,
+    rados_aio_release, rados_completion_t,
 };
 
 struct Completion {
     inner: rados_completion_t,
 
-    // Box to provide a stable address for completion_complete callback
-    // Mutex to make Sync-safe for write from poll() vs read from completion_complete
-    waker: Box<std::sync::Mutex<Option<std::task::Waker>>>,
-
-    // A reference to the IOCtx is required to issue a cancel on
-    // the operation if we are dropped before ready.  This needs
-    // to be an Arc rather than a raw rados_ioctx_t because otherwise
-    // there would be nothing to stop the rados_ioctx_t being invalidated
-    // during the lifetime of this Completion.
-    // (AioCompletionImpl does hold a reference to IoCtxImpl for writes, but
-    //  not for reads.)
-    ioctx: Arc<IoCtx>,
+    // - Arc to provide a stable address for completion_complete callback, and
+    // refcounting to allow the librados completion to call into completion_complete
+    // safely even if Completion has been dropped.
+    // - Mutex to make Sync-safe for write from poll() vs read from completion_complete
+    waker: Arc<Mutex<Option<std::task::Waker>>>,
 }
 
 unsafe impl Send for Completion {}
 
 #[no_mangle]
 pub extern "C" fn completion_complete(_cb: rados_completion_t, arg: *mut c_void) -> () {
-    let waker = unsafe {
-        let p = arg as *mut Mutex<Option<Waker>>;
-        p.as_mut().unwrap()
-    };
+    let waker = unsafe { Arc::from_raw(arg as *mut Mutex<Option<Waker>>) };
 
-    let waker = waker.lock().unwrap().take();
-    match waker {
-        Some(w) => w.wake(),
-        None => {}
+    let locked = waker.lock().unwrap().take();
+    if let Some(w) = locked {
+        w.wake()
     }
 }
 
 impl Drop for Completion {
     fn drop(&mut self) {
-        // Ensure that after dropping the Completion, the AIO callback
-        // will not be called on our dropped waker Box.  Only necessary
-        // if we got as far as successfully starting an operation using
-        // the completion.
-        let am_complete = unsafe { rados_aio_is_complete(self.inner) } != 0;
-        if !am_complete {
-            unsafe {
-                rados_aio_cancel(self.ioctx.ioctx, self.inner);
-                rados_aio_wait_for_complete_and_cb(self.inner);
-            }
-        }
+        // If we had a waker registered, forget it.  Any subsequent calls up from
+        // librados into completion_complete will be no-ops apart from decrementing
+        // the reference count on the waker Arc to allow it to drop.
+        *self.waker.lock().unwrap() = None;
 
         unsafe {
             rados_aio_release(self.inner);
@@ -97,52 +77,75 @@ impl std::future::Future for Completion {
     }
 }
 
-fn with_completion_impl<F>(ioctx: Arc<IoCtx>, f: F) -> RadosResult<Completion>
+fn with_completion_impl<F>(f: F) -> RadosResult<Completion>
 where
     F: FnOnce(rados_completion_t) -> libc::c_int,
 {
-    let mut waker = Box::new(Mutex::new(None));
+    let waker = Arc::new(Mutex::new(None));
 
-    let completion = unsafe {
+    let (completion, waker_p) = unsafe {
         let mut completion: rados_completion_t = std::ptr::null_mut();
-        let p: *mut Mutex<Option<Waker>> = &mut *waker;
-        let p = p as *mut c_void;
+
+        // Leak a reference to waker.  This will get cleaned up by completion_complete,
+        // or later in this function if there's an error dispatching the I/O.
+        let p = Arc::into_raw(waker.clone()) as *mut c_void;
 
         let r = rados_aio_create_completion2(p, Some(completion_complete), &mut completion);
         if r != 0 {
             panic!("Error {} allocating RADOS completion: out of memory?", r);
         }
 
-        completion
+        (completion, p)
     };
 
     let ret_code = f(completion);
     if ret_code < 0 {
-        // On error dispatching I/O, drop the unused rados_completion_t
+        // On error dispatching I/O, drop the unused rados_completion_t and decrement
+        // the refcount on waker
         unsafe {
+            Arc::from_raw(waker_p);
             rados_aio_release(completion);
-            drop(completion)
         }
         Err(ret_code.into())
     } else {
         // Pass the rados_completion_t into a Future-implementing wrapper and await it.
-        Ok(Completion {
-            ioctx,
+
+        let wrapped = Completion {
             inner: completion,
-            waker,
-        })
+            waker: waker.clone(),
+        };
+
+        Ok(wrapped)
     }
 }
 /// Completions are only created via this wrapper, in order to ensure
 /// that the Completion struct is only constructed around 'armed' rados_completion_t
 /// instances (i.e. those that have been used to start an I/O).
-pub async fn with_completion<F>(ioctx: Arc<IoCtx>, f: F) -> RadosResult<i32>
+pub async fn with_completion<F>(f: F) -> RadosResult<i32>
 where
     F: FnOnce(rados_completion_t) -> libc::c_int,
 {
     // Hide c_void* temporaries in a non-async function so that the future generated
     // by this function isn't encumbered by their non-Send-ness.
-    let completion = with_completion_impl(ioctx, f)?;
+    let completion = with_completion_impl(f)?;
 
     completion.await
+}
+
+#[cfg(test)]
+mod test {
+    use crate::completion::with_completion;
+    use crate::error::RadosError::ApiError;
+    use futures::FutureExt;
+
+    #[test]
+    /// Test that on early errors, we do not block or panic
+    fn dispatch_err() {
+        let wait_result = with_completion(|_c| -5).now_or_never();
+
+        match wait_result {
+            Some(Err(ApiError(e))) => assert_eq!(e, nix::errno::Errno::EIO),
+            _ => panic!("Bad IO result"),
+        };
+    }
 }
