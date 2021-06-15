@@ -26,7 +26,7 @@ use nom::number::complete::le_u32;
 use nom::IResult;
 use serde_json;
 
-use crate::completion::Completion;
+use crate::completion::{with_completion, Completion};
 use crate::rados::*;
 #[cfg(feature = "rados_striper")]
 use crate::rados_striper::*;
@@ -935,6 +935,54 @@ impl IoCtx {
             }
         }
         Ok(())
+    }
+
+    pub async fn rados_async_object_write(
+        &self,
+        object_name: &str,
+        buffer: &[u8],
+        offset: u64,
+    ) -> RadosResult<i32> {
+        self.ioctx_guard()?;
+        let obj_name_str = CString::new(object_name)?;
+
+        let completion = Completion::new();
+
+        let ret_code = unsafe {
+            rados_aio_write(
+                self.ioctx,
+                obj_name_str.as_ptr(),
+                completion.get_completion(),
+                buffer.as_ptr() as *const ::libc::c_char,
+                buffer.len(),
+                offset,
+            )
+        };
+        if ret_code < 0 {
+            Err(ret_code.into())
+        } else {
+            completion.await
+        }
+    }
+
+    pub async fn rados_async_object_write_full(
+        &self,
+        object_name: &str,
+        buffer: &[u8],
+    ) -> RadosResult<i32> {
+        self.ioctx_guard()?;
+        let obj_name_str = CString::new(object_name)?;
+
+        with_completion(|c| unsafe {
+            rados_aio_write_full(
+                self.ioctx,
+                obj_name_str.as_ptr(),
+                c,
+                buffer.as_ptr() as *const ::libc::c_char,
+                buffer.len(),
+            )
+        })
+        .await
     }
 
     /// Efficiently copy a portion of one object to another
