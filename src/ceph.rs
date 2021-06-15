@@ -41,6 +41,7 @@ use std::net::IpAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use uuid::Uuid;
 
@@ -335,7 +336,8 @@ impl Iterator for XAttr {
 
 /// Owns a ioctx handle
 pub struct IoCtx {
-    ioctx: rados_ioctx_t,
+    // This is pub within the crate to enable Completions to use it
+    pub(crate) ioctx: rados_ioctx_t,
 }
 
 unsafe impl Send for IoCtx {}
@@ -937,8 +939,9 @@ impl IoCtx {
         Ok(())
     }
 
+    /// Async variant of rados_object_write
     pub async fn rados_async_object_write(
-        &self,
+        self: &Arc<Self>,
         object_name: &str,
         buffer: &[u8],
         offset: u64,
@@ -946,34 +949,29 @@ impl IoCtx {
         self.ioctx_guard()?;
         let obj_name_str = CString::new(object_name)?;
 
-        let completion = Completion::new();
-
-        let ret_code = unsafe {
+        with_completion(self.clone(), |c| unsafe {
             rados_aio_write(
                 self.ioctx,
                 obj_name_str.as_ptr(),
-                completion.get_completion(),
+                c,
                 buffer.as_ptr() as *const ::libc::c_char,
                 buffer.len(),
                 offset,
             )
-        };
-        if ret_code < 0 {
-            Err(ret_code.into())
-        } else {
-            completion.await
-        }
+        })
+        .await
     }
 
+    /// Async variant of rados_object_write_full
     pub async fn rados_async_object_write_full(
-        &self,
+        self: &Arc<Self>,
         object_name: &str,
         buffer: &[u8],
     ) -> RadosResult<i32> {
         self.ioctx_guard()?;
         let obj_name_str = CString::new(object_name)?;
 
-        with_completion(|c| unsafe {
+        with_completion(self.clone(), |c| unsafe {
             rados_aio_write_full(
                 self.ioctx,
                 obj_name_str.as_ptr(),
@@ -983,6 +981,18 @@ impl IoCtx {
             )
         })
         .await
+    }
+
+    /// Async variant of rados_object_remove
+    pub async fn rados_async_object_remove(self: &Arc<Self>, object_name: &str) -> RadosResult<()> {
+        self.ioctx_guard()?;
+        let object_name_str = CString::new(object_name)?;
+
+        with_completion(self.clone(), |c| unsafe {
+            rados_aio_remove(self.ioctx, object_name_str.as_ptr() as *const c_char, c)
+        })
+        .await
+        .map(|_r| ())
     }
 
     /// Efficiently copy a portion of one object to another

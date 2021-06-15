@@ -14,21 +14,32 @@
 
 use std::ffi::c_void;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
+use crate::ceph::IoCtx;
 use crate::error::RadosResult;
 use crate::rados::{
-    rados_aio_create_completion2, rados_aio_get_return_value, rados_aio_is_complete,
-    rados_aio_release, rados_aio_wait_for_complete_and_cb, rados_completion_t,
+    rados_aio_cancel, rados_aio_create_completion2, rados_aio_get_return_value,
+    rados_aio_is_complete, rados_aio_release, rados_aio_wait_for_complete_and_cb,
+    rados_completion_t,
 };
 
 pub struct Completion {
-    completion: rados_completion_t,
+    inner: rados_completion_t,
+
+    armed: bool,
 
     // Box to provide a stable address for completion_complete callback
     // Mutex to make Sync-safe for write from poll() vs read from completion_complete
     waker: Box<std::sync::Mutex<Option<std::task::Waker>>>,
+
+    // A reference to the IOCtx is required to issue a cancel on
+    // the operation if we are dropped before ready.  This needs
+    // to be an Arc rather than a raw rados_ioctx_t because otherwise
+    // there would be nothing to stop the rados_ioctx_t being invalidated
+    // during the lifetime of this Completion.
+    ioctx: Arc<IoCtx>,
 }
 
 unsafe impl Send for Completion {}
@@ -48,7 +59,7 @@ pub extern "C" fn completion_complete(_cb: rados_completion_t, arg: *mut c_void)
 }
 
 impl Completion {
-    pub fn new() -> Self {
+    fn new(ioctx: Arc<IoCtx>) -> Self {
         let mut waker = Box::new(Mutex::new(None));
 
         let completion = unsafe {
@@ -64,29 +75,30 @@ impl Completion {
             completion
         };
 
-        Self { completion, waker }
-    }
-
-    pub fn get_completion(&self) -> rados_completion_t {
-        self.completion
+        Self {
+            inner: completion,
+            waker,
+            ioctx,
+            armed: false,
+        }
     }
 }
 
 impl Drop for Completion {
     fn drop(&mut self) {
-        let am_complete = unsafe { rados_aio_is_complete(self.completion) } != 0;
+        let am_complete = unsafe { rados_aio_is_complete(self.inner) } != 0;
 
-        // We must block here to avoid leaving the completion in an armed
-        // state (where it would call its callback on a dropped Completion)
-        // when we release it.
-        if !am_complete {
+        // Ensure that after dropping the Completion, the AIO callback
+        // will not be called on our dropped waker Box
+        if self.armed && !am_complete {
             unsafe {
-                rados_aio_wait_for_complete_and_cb(self.completion);
+                rados_aio_cancel(self.ioctx.ioctx, self.inner);
+                rados_aio_wait_for_complete_and_cb(self.inner);
             }
         }
 
         unsafe {
-            rados_aio_release(self.completion);
+            rados_aio_release(self.inner);
         }
     }
 }
@@ -95,10 +107,10 @@ impl std::future::Future for Completion {
     type Output = crate::error::RadosResult<i32>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let am_complete = unsafe { rados_aio_is_complete(self.completion) } != 0;
+        let am_complete = unsafe { rados_aio_is_complete(self.inner) } != 0;
 
         if am_complete {
-            let r = unsafe { rados_aio_get_return_value(self.completion) };
+            let r = unsafe { rados_aio_get_return_value(self.inner) };
             let result = if r < 0 { Err(r.into()) } else { Ok(r) };
             std::task::Poll::Ready(result)
         } else {
@@ -110,15 +122,16 @@ impl std::future::Future for Completion {
     }
 }
 
-pub async fn with_completion<F>(f: F) -> RadosResult<i32>
+pub async fn with_completion<F>(ioctx: Arc<IoCtx>, f: F) -> RadosResult<i32>
 where
     F: FnOnce(rados_completion_t) -> libc::c_int,
 {
-    let completion = Completion::new();
-    let ret_code = f(completion.get_completion());
+    let mut completion = Completion::new(ioctx);
+    let ret_code = f(completion.inner);
     if ret_code < 0 {
         Err(ret_code.into())
     } else {
+        completion.armed = true;
         completion.await
     }
 }
