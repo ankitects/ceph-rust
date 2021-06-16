@@ -29,7 +29,7 @@ struct Completion {
     // - Arc to provide a stable address for completion_complete callback, and
     // refcounting to allow the librados completion to call into completion_complete
     // safely even if Completion has been dropped.
-    // - Mutex to make Sync-safe for write from poll() vs read from completion_complete
+    // - Mutex for memory fencing when writing from poll() and reading from completion_complete()
     waker: Arc<Mutex<Option<std::task::Waker>>>,
 }
 
@@ -94,6 +94,7 @@ where
         if r != 0 {
             panic!("Error {} allocating RADOS completion: out of memory?", r);
         }
+        assert!(!completion.is_null());
 
         (completion, p)
     };
