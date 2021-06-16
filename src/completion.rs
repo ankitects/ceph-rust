@@ -112,6 +112,7 @@ where
         if r != 0 {
             panic!("Error {} allocating RADOS completion: out of memory?", r);
         }
+        assert!(!completion.is_null());
 
         completion
     };
