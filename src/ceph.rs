@@ -960,7 +960,7 @@ impl IoCtx {
 
     /// Async variant of rados_object_write
     pub async fn rados_async_object_write(
-        self: &Arc<Self>,
+        &self,
         object_name: &str,
         buffer: &[u8],
         offset: u64,
@@ -968,7 +968,7 @@ impl IoCtx {
         self.ioctx_guard()?;
         let obj_name_str = CString::new(object_name)?;
 
-        with_completion(self.clone(), |c| unsafe {
+        with_completion(self, |c| unsafe {
             rados_aio_write(
                 self.ioctx,
                 obj_name_str.as_ptr(),
@@ -977,20 +977,20 @@ impl IoCtx {
                 buffer.len(),
                 offset,
             )
-        })
+        })?
         .await
     }
 
     /// Async variant of rados_object_append
     pub async fn rados_async_object_append(
-        self: &Arc<Self>,
+        &self,
         object_name: &str,
         buffer: &[u8],
     ) -> RadosResult<i32> {
         self.ioctx_guard()?;
         let obj_name_str = CString::new(object_name)?;
 
-        with_completion(self.clone(), |c| unsafe {
+        with_completion(self, |c| unsafe {
             rados_aio_append(
                 self.ioctx,
                 obj_name_str.as_ptr(),
@@ -998,20 +998,20 @@ impl IoCtx {
                 buffer.as_ptr() as *const ::libc::c_char,
                 buffer.len(),
             )
-        })
+        })?
         .await
     }
 
     /// Async variant of rados_object_write_full
     pub async fn rados_async_object_write_full(
-        self: &Arc<Self>,
+        &self,
         object_name: &str,
         buffer: &[u8],
     ) -> RadosResult<i32> {
         self.ioctx_guard()?;
         let obj_name_str = CString::new(object_name)?;
 
-        with_completion(self.clone(), |c| unsafe {
+        with_completion(self, |c| unsafe {
             rados_aio_write_full(
                 self.ioctx,
                 obj_name_str.as_ptr(),
@@ -1019,25 +1019,25 @@ impl IoCtx {
                 buffer.as_ptr() as *const ::libc::c_char,
                 buffer.len(),
             )
-        })
+        })?
         .await
     }
 
     /// Async variant of rados_object_remove
-    pub async fn rados_async_object_remove(self: &Arc<Self>, object_name: &str) -> RadosResult<()> {
+    pub async fn rados_async_object_remove(&self, object_name: &str) -> RadosResult<()> {
         self.ioctx_guard()?;
         let object_name_str = CString::new(object_name)?;
 
-        with_completion(self.clone(), |c| unsafe {
+        with_completion(self, |c| unsafe {
             rados_aio_remove(self.ioctx, object_name_str.as_ptr() as *const c_char, c)
-        })
+        })?
         .await
         .map(|_r| ())
     }
 
     /// Async variant of rados_object_read
     pub async fn rados_async_object_read(
-        self: &Arc<Self>,
+        &self,
         object_name: &str,
         fill_buffer: &mut Vec<u8>,
         read_offset: u64,
@@ -1049,7 +1049,7 @@ impl IoCtx {
             fill_buffer.reserve_exact(DEFAULT_READ_BYTES);
         }
 
-        with_completion(self.clone(), |c| unsafe {
+        with_completion(self, |c| unsafe {
             rados_aio_read(
                 self.ioctx,
                 obj_name_str.as_ptr(),
@@ -1058,7 +1058,7 @@ impl IoCtx {
                 fill_buffer.capacity(),
                 read_offset,
             )
-        })
+        })?
         .await
     }
 

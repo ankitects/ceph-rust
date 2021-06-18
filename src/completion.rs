@@ -14,7 +14,7 @@
 
 use std::ffi::c_void;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 
 use crate::ceph::IoCtx;
@@ -25,7 +25,7 @@ use crate::rados::{
     rados_completion_t,
 };
 
-struct Completion {
+pub(crate) struct Completion<'a> {
     inner: rados_completion_t,
 
     // Box to provide a stable address for completion_complete callback
@@ -34,15 +34,15 @@ struct Completion {
 
     // A reference to the IOCtx is required to issue a cancel on
     // the operation if we are dropped before ready.  This needs
-    // to be an Arc rather than a raw rados_ioctx_t because otherwise
+    // to be a Rust reference rather than a raw rados_ioctx_t because otherwise
     // there would be nothing to stop the rados_ioctx_t being invalidated
     // during the lifetime of this Completion.
     // (AioCompletionImpl does hold a reference to IoCtxImpl for writes, but
     //  not for reads.)
-    ioctx: Arc<IoCtx>,
+    ioctx: &'a IoCtx,
 }
 
-unsafe impl Send for Completion {}
+unsafe impl Send for Completion<'_> {}
 
 #[no_mangle]
 pub extern "C" fn completion_complete(_cb: rados_completion_t, arg: *mut c_void) -> () {
@@ -58,7 +58,7 @@ pub extern "C" fn completion_complete(_cb: rados_completion_t, arg: *mut c_void)
     }
 }
 
-impl Drop for Completion {
+impl Drop for Completion<'_> {
     fn drop(&mut self) {
         // Ensure that after dropping the Completion, the AIO callback
         // will not be called on our dropped waker Box.  Only necessary
@@ -67,7 +67,11 @@ impl Drop for Completion {
         let am_complete = unsafe { rados_aio_is_complete(self.inner) } != 0;
         if !am_complete {
             unsafe {
-                rados_aio_cancel(self.ioctx.ioctx, self.inner);
+                let cancel_r = rados_aio_cancel(self.ioctx.ioctx, self.inner);
+
+                // It is unsound to proceed if the Objecter op is still in flight
+                assert!(cancel_r == 0 || cancel_r == -libc::ENOENT);
+
                 rados_aio_wait_for_complete_and_cb(self.inner);
             }
         }
@@ -78,7 +82,7 @@ impl Drop for Completion {
     }
 }
 
-impl std::future::Future for Completion {
+impl std::future::Future for Completion<'_> {
     type Output = crate::error::RadosResult<i32>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -97,7 +101,10 @@ impl std::future::Future for Completion {
     }
 }
 
-fn with_completion_impl<F>(ioctx: Arc<IoCtx>, f: F) -> RadosResult<Completion>
+/// Completions are only created via this wrapper, in order to ensure
+/// that the Completion struct is only constructed around 'armed' rados_completion_t
+/// instances (i.e. those that have been used to start an I/O).
+pub(crate) fn with_completion<F>(ioctx: &IoCtx, f: F) -> RadosResult<Completion<'_>>
 where
     F: FnOnce(rados_completion_t) -> libc::c_int,
 {
@@ -133,17 +140,4 @@ where
             waker,
         })
     }
-}
-/// Completions are only created via this wrapper, in order to ensure
-/// that the Completion struct is only constructed around 'armed' rados_completion_t
-/// instances (i.e. those that have been used to start an I/O).
-pub async fn with_completion<F>(ioctx: Arc<IoCtx>, f: F) -> RadosResult<i32>
-where
-    F: FnOnce(rados_completion_t) -> libc::c_int,
-{
-    // Hide c_void* temporaries in a non-async function so that the future generated
-    // by this function isn't encumbered by their non-Send-ness.
-    let completion = with_completion_impl(ioctx, f)?;
-
-    completion.await
 }
