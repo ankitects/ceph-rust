@@ -1049,7 +1049,7 @@ impl IoCtx {
             fill_buffer.reserve_exact(DEFAULT_READ_BYTES);
         }
 
-        with_completion(self, |c| unsafe {
+        let result = with_completion(self, |c| unsafe {
             rados_aio_read(
                 self.ioctx,
                 obj_name_str.as_ptr(),
@@ -1059,7 +1059,20 @@ impl IoCtx {
                 read_offset,
             )
         })?
-        .await
+        .await;
+
+        if let Ok(rval) = &result {
+            unsafe {
+                // Completion should have handled any negative (error) values already
+                assert!(*rval >= 0);
+
+                let len = *rval as usize;
+                assert!(len <= fill_buffer.capacity());
+                fill_buffer.set_len(len);
+            }
+        }
+
+        result
     }
 
     /// Get object stats (size,SystemTime)
