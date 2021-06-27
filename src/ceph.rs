@@ -42,6 +42,7 @@ use std::net::IpAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::read_stream::ReadStream;
+pub use crate::write_sink::WriteSink;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -1081,8 +1082,21 @@ impl IoCtx {
     ///
     /// This will usually issue more read ops than needed if used on a small object: for
     /// small objects `rados_async_object_read` is more appropriate.
-    pub fn rados_async_object_read_stream(&self, object_name: &str) -> ReadStream<'_> {
-        ReadStream::new(self, object_name, None, None)
+    pub fn rados_async_object_read_stream(
+        &self,
+        object_name: &str,
+        buffer_size: Option<usize>,
+        concurrency: Option<usize>,
+        size_hint: Option<u64>,
+    ) -> ReadStream<'_> {
+        ReadStream::new(self, object_name, buffer_size, concurrency, size_hint)
+    }
+
+    /// Streaming write of a RADOS object.  The `WriteSink` object implements `futures::Sink`.  Combine
+    /// it with other stream-aware code, or bring the SinkExt trait into scope to get methods
+    /// like send, send_all.
+    pub fn rados_async_object_write_stream(&self, object_name: &str) -> WriteSink<'_> {
+        WriteSink::new(self, object_name)
     }
 
     /// Get object stats (size,SystemTime)

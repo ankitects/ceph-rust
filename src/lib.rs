@@ -81,6 +81,7 @@ mod ceph_version;
 pub(crate) mod completion;
 mod mon_command;
 pub(crate) mod read_stream;
+pub(crate) mod write_sink;
 
 pub use crate::ceph_client::CephClient;
 pub use crate::ceph_version::CephVersion;
