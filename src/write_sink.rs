@@ -10,6 +10,8 @@ use crate::rados::rados_aio_write;
 use std::ffi::CString;
 use std::os::raw::c_char;
 
+const DEFAULT_CONCURRENCY: usize = 2;
+
 pub struct WriteSink<'a> {
     ioctx: &'a IoCtx,
     in_flight: Vec<Pin<Box<dyn Future<Output = RadosResult<i32>> + 'a>>>,
@@ -17,26 +19,62 @@ pub struct WriteSink<'a> {
 
     // Offset into object where the next write will land
     next: u64,
+
+    // How many RADOS ops in flight at same time?
+    concurrency: usize,
 }
 
+unsafe impl Send for WriteSink<'_> {}
+
 impl<'a> WriteSink<'a> {
-    pub fn new(ioctx: &'a IoCtx, object_name: &str) -> Self {
+    pub fn new(ioctx: &'a IoCtx, object_name: &str, concurrency: Option<usize>) -> Self {
+        let concurrency = concurrency.unwrap_or(DEFAULT_CONCURRENCY);
+        assert!(concurrency > 0);
+
         Self {
             ioctx,
             in_flight: Vec::new(),
             object_name: object_name.to_string(),
             next: 0,
+            concurrency,
         }
+    }
+
+    fn trim_in_flight(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        target_len: usize,
+    ) -> Poll<Result<(), <Self as Sink<Vec<u8>>>::Error>> {
+        // FIXME: there's no reason these need to complete in-order.
+
+        while self.in_flight.len() > target_len {
+            match self.in_flight[0].as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(result) => {
+                    self.in_flight.remove(0);
+
+                    match result {
+                        Err(e) => return Poll::Ready(Err(e)),
+                        Ok(sz) => {
+                            debug!("flush: IO completed with r={}", sz);
+                        }
+                    }
+                }
+            };
+        }
+
+        // Nothing left in flight, we're done
+        Poll::Ready(Ok(()))
     }
 }
 
 impl<'a> Sink<Vec<u8>> for WriteSink<'a> {
     type Error = RadosError;
 
-    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // TODO: limit number of concurrent ops -- currently we just always advertise
-        // readiness and will kick off an unbounded number of RADOS operations via start_send
-        Poll::Ready(Ok(()))
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // If we have fewer than 1 slots available, this will try to wait on some outstanding futures
+        let target = self.as_ref().concurrency - 1;
+        self.trim_in_flight(cx, target)
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: Vec<u8>) -> Result<(), Self::Error> {
@@ -71,25 +109,8 @@ impl<'a> Sink<Vec<u8>> for WriteSink<'a> {
         }
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        while !self.in_flight.is_empty() {
-            match self.in_flight[0].as_mut().poll(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(result) => {
-                    self.in_flight.remove(0);
-
-                    match result {
-                        Err(e) => return Poll::Ready(Err(e)),
-                        Ok(sz) => {
-                            debug!("flush: IO completed with r={}", sz);
-                        }
-                    }
-                }
-            };
-        }
-
-        // Nothing left in flight, we're done
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.trim_in_flight(cx, 0)
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
