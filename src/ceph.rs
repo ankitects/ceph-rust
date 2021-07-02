@@ -41,6 +41,7 @@ use std::io::{BufRead, Cursor};
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::list_stream::ListStream;
 use crate::read_stream::ReadStream;
 pub use crate::write_sink::WriteSink;
 use std::pin::Pin;
@@ -1121,6 +1122,19 @@ impl IoCtx {
         concurrency: Option<usize>,
     ) -> WriteSink<'_> {
         WriteSink::new(self, object_name, concurrency)
+    }
+
+    pub fn rados_async_object_list(&self) -> RadosResult<ListStream> {
+        self.ioctx_guard()?;
+        let mut rados_list_ctx: rados_list_ctx_t = ptr::null_mut();
+        unsafe {
+            let r = rados_nobjects_list_open(self.ioctx, &mut rados_list_ctx);
+            if r == 0 {
+                Ok(ListStream::new(rados_list_ctx))
+            } else {
+                Err(r.into())
+            }
+        }
     }
 
     /// Get object stats (size,SystemTime)
