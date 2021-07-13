@@ -1,4 +1,4 @@
-use futures::{FutureExt, Sink};
+use futures::{FutureExt, Sink, Stream};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -7,6 +7,7 @@ use crate::ceph::IoCtx;
 use crate::completion::with_completion;
 use crate::error::{RadosError, RadosResult};
 use crate::rados::rados_aio_write;
+use futures::stream::FuturesUnordered;
 use std::ffi::CString;
 use std::os::raw::c_char;
 
@@ -14,7 +15,7 @@ const DEFAULT_CONCURRENCY: usize = 2;
 
 pub struct WriteSink<'a> {
     ioctx: &'a IoCtx,
-    in_flight: Vec<Pin<Box<dyn Future<Output = RadosResult<i32>> + 'a>>>,
+    in_flight: Pin<Box<FuturesUnordered<Pin<Box<dyn Future<Output = RadosResult<i32>> + 'a>>>>>,
     object_name: String,
 
     // Offset into object where the next write will land
@@ -33,7 +34,7 @@ impl<'a> WriteSink<'a> {
 
         Self {
             ioctx,
-            in_flight: Vec::new(),
+            in_flight: Box::pin(FuturesUnordered::new()),
             object_name: object_name.to_string(),
             next: 0,
             concurrency,
@@ -45,21 +46,19 @@ impl<'a> WriteSink<'a> {
         cx: &mut Context<'_>,
         target_len: usize,
     ) -> Poll<Result<(), <Self as Sink<Vec<u8>>>::Error>> {
-        // FIXME: there's no reason these need to complete in-order.
-
         while self.in_flight.len() > target_len {
-            match self.in_flight[0].as_mut().poll(cx) {
+            match self.in_flight.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(result) => {
-                    self.in_flight.remove(0);
-
-                    match result {
-                        Err(e) => return Poll::Ready(Err(e)),
-                        Ok(sz) => {
-                            debug!("flush: IO completed with r={}", sz);
-                        }
-                    }
+                Poll::Ready(None) => {
+                    // (because we check for in_flight size first)
+                    unreachable!()
                 }
+                Poll::Ready(Some(result)) => match result {
+                    Err(e) => return Poll::Ready(Err(e)),
+                    Ok(sz) => {
+                        debug!("trim_in_flight: IO completed with r={}", sz);
+                    }
+                },
             };
         }
 
@@ -74,7 +73,11 @@ impl<'a> Sink<Vec<u8>> for WriteSink<'a> {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         // If we have fewer than 1 slots available, this will try to wait on some outstanding futures
         let target = self.as_ref().concurrency - 1;
-        self.trim_in_flight(cx, target)
+        if self.in_flight.len() > target {
+            self.trim_in_flight(cx, target)
+        } else {
+            Poll::Ready(Ok(()))
+        }
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: Vec<u8>) -> Result<(), Self::Error> {
