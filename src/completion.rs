@@ -20,7 +20,7 @@ use std::task::{Context, Poll, Waker};
 use crate::ceph::IoCtx;
 use crate::error::RadosResult;
 use crate::rados::{
-    rados_aio_cancel, rados_aio_create_completion2, rados_aio_get_return_value,
+    rados_aio_cancel, rados_aio_create_completion, rados_aio_get_return_value,
     rados_aio_is_complete, rados_aio_release, rados_aio_wait_for_complete_and_cb,
     rados_completion_t,
 };
@@ -133,7 +133,7 @@ where
         let p: *mut Mutex<Option<Waker>> = &mut *waker;
         let p = p as *mut c_void;
 
-        let r = rados_aio_create_completion2(p, Some(completion_complete), &mut completion);
+        let r = rados_aio_create_completion(p, Some(completion_complete), None, &mut completion);
         if r != 0 {
             panic!("Error {} allocating RADOS completion: out of memory?", r);
         }
