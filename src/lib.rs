@@ -55,7 +55,6 @@ extern crate byteorder;
 extern crate libc;
 #[macro_use]
 extern crate tracing;
-#[macro_use]
 extern crate nom;
 extern crate serde;
 #[macro_use]

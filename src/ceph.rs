@@ -23,7 +23,13 @@ use crate::JsonValue;
 use byteorder::{LittleEndian, WriteBytesExt};
 use futures::task::SpawnExt;
 use libc::*;
+use nom::branch::alt;
+use nom::bytes::complete::take;
+use nom::character::complete::char;
+use nom::combinator::complete;
+use nom::multi::many0;
 use nom::number::complete::le_u32;
+use nom::sequence::tuple;
 use nom::IResult;
 use serde_json;
 
@@ -70,59 +76,59 @@ pub enum CephCommandTypes {
     Pgs,
 }
 
-named!(
-    parse_header<TmapOperation>,
-    do_parse!(
-        char!(CEPH_OSD_TMAP_HDR)
-            >> data_len: le_u32
-            >> data: take!(data_len)
-            >> (TmapOperation::Header {
-                data: data.to_vec()
-            })
-    )
-);
+fn parse_header(
+    input: &[u8],
+) -> Result<(&[u8], TmapOperation), nom::Err<nom::error::Error<&[u8]>>> {
+    let (input, (_, data_len)) = tuple((char(CEPH_OSD_TMAP_HDR), le_u32))(input)?;
+    let (input, data) = take(data_len)(input)?;
+    Ok((
+        input,
+        TmapOperation::Header {
+            data: data.to_vec(),
+        },
+    ))
+}
 
-named!(
-    parse_create<TmapOperation>,
-    do_parse!(
-        char!(CEPH_OSD_TMAP_CREATE)
-            >> key_name_len: le_u32
-            >> key_name: take_str!(key_name_len)
-            >> data_len: le_u32
-            >> data: take!(data_len)
-            >> (TmapOperation::Create {
-                name: key_name.to_string(),
-                data: data.to_vec(),
-            })
-    )
-);
+fn parse_create(
+    input: &[u8],
+) -> Result<(&[u8], TmapOperation), nom::Err<nom::error::Error<&[u8]>>> {
+    let (input, (_, key_len)) = tuple((char(CEPH_OSD_TMAP_CREATE), le_u32))(input)?;
+    let (input, name) = take(key_len)(input)?;
+    let name = String::from_utf8_lossy(name).into_owned();
+    let (input, data_len) = le_u32(input)?;
+    let (input, data) = take(data_len)(input)?;
+    Ok((
+        input,
+        TmapOperation::Create {
+            name,
+            data: data.to_vec(),
+        },
+    ))
+}
 
-named!(
-    parse_set<TmapOperation>,
-    do_parse!(
-        char!(CEPH_OSD_TMAP_SET)
-            >> key_name_len: le_u32
-            >> key_name: take_str!(key_name_len)
-            >> data_len: le_u32
-            >> data: take!(data_len)
-            >> (TmapOperation::Set {
-                key: key_name.to_string(),
-                data: data.to_vec(),
-            })
-    )
-);
+fn parse_set(input: &[u8]) -> Result<(&[u8], TmapOperation), nom::Err<nom::error::Error<&[u8]>>> {
+    let (input, (_, key_len)) = tuple((char(CEPH_OSD_TMAP_SET), le_u32))(input)?;
+    let (input, name) = take(key_len)(input)?;
+    let name = String::from_utf8_lossy(name).into_owned();
+    let (input, data_len) = le_u32(input)?;
+    let (input, data) = take(data_len)(input)?;
+    Ok((
+        input,
+        TmapOperation::Set {
+            key: name,
+            data: data.to_vec(),
+        },
+    ))
+}
 
-named!(
-    parse_remove<TmapOperation>,
-    do_parse!(
-        char!(CEPH_OSD_TMAP_RM)
-            >> key_name_len: le_u32
-            >> key_name: take_str!(key_name_len)
-            >> (TmapOperation::Remove {
-                name: key_name.to_string(),
-            })
-    )
-);
+fn parse_remove(
+    input: &[u8],
+) -> Result<(&[u8], TmapOperation), nom::Err<nom::error::Error<&[u8]>>> {
+    let (input, (_, key_len)) = tuple((char(CEPH_OSD_TMAP_RM), le_u32))(input)?;
+    let (input, key) = take(key_len)(input)?;
+    let name = String::from_utf8_lossy(key).into_owned();
+    Ok((input, TmapOperation::Remove { name }))
+}
 
 #[derive(Debug)]
 pub enum TmapOperation {
@@ -165,15 +171,12 @@ impl TmapOperation {
     }
 
     fn deserialize(input: &[u8]) -> IResult<&[u8], Vec<TmapOperation>> {
-        many0!(
-            input,
-            alt!(
-                complete!(parse_header)
-                    | complete!(parse_create)
-                    | complete!(parse_set)
-                    | complete!(parse_remove)
-            )
-        )
+        many0(alt((
+            complete(parse_header),
+            complete(parse_create),
+            complete(parse_set),
+            complete(parse_remove),
+        )))(input)
     }
 }
 
