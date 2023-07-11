@@ -55,8 +55,7 @@ bitflags! {
 }
 impl AllocFlags {
     pub fn clear(&mut self) {
-        self.bits = 0; // The `bits` field can be accessed from within the
-                       // same module where the `bitflags!` macro was invoked.
+        *self.0.bits_mut() = 0;
     }
 }
 
@@ -72,8 +71,7 @@ bitflags! {
 }
 impl XattrFlags {
     pub fn clear(&mut self) {
-        self.bits = 0; // The `bits` field can be accessed from within the
-                       // same module where the `bitflags!` macro was invoked.
+        *self.0.bits_mut() = 0;
     }
 }
 
@@ -93,8 +91,7 @@ bitflags! {
 
 impl OperationFlags {
     pub fn clear(&mut self) {
-        self.bits = 0; // The `bits` field can be accessed from within the
-                       // same module where the `bitflags!` macro was invoked.
+        *self.0.bits_mut() = 0;
     }
 }
 
